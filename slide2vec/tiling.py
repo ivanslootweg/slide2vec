@@ -44,42 +44,46 @@ def process_slide(
     """
     wsi_name = wsi_path.stem.replace(" ", "_")
     try:
-        tissue_mask_visu_path = None
-        if cfg.visualize and mask_visualize_dir is not None:
-            tissue_mask_visu_path = Path(mask_visualize_dir, f"{wsi_name}.jpg")
-        coordinates, tile_level, resize_factor, tile_size_lv0 = extract_coordinates(
-            wsi_path=wsi_path,
-            mask_path=mask_path,
-            backend=cfg.tiling.backend,
-            tiling_params=cfg.tiling.params,
-            segment_params=cfg.tiling.seg_params,
-            filter_params=cfg.tiling.filter_params,
-            mask_visu_path=tissue_mask_visu_path,
-            num_workers=num_workers,
-        )
         coordinates_dir = Path(cfg.output_dir, "coordinates")
         coordinates_path = Path(coordinates_dir, f"{wsi_name}.npy")
-        save_coordinates(
-            coordinates=coordinates,
-            target_spacing=cfg.tiling.params.spacing,
-            tile_level=tile_level,
-            tile_size=cfg.tiling.params.tile_size,
-            resize_factor=resize_factor,
-            tile_size_lv0=tile_size_lv0,
-            save_path=coordinates_path,
-        )
-        if cfg.visualize and tile_visualize_dir is not None:
-            visualize_coordinates(
+        if not coordinates_path.exists():
+            tissue_mask_visu_path = None
+            if cfg.visualize and mask_visualize_dir is not None:
+                tissue_mask_visu_path = Path(mask_visualize_dir, f"{wsi_name}.jpg")
+            coordinates, tile_level, resize_factor, tile_size_lv0 = extract_coordinates(
                 wsi_path=wsi_path,
-                coordinates=coordinates,
-                tile_size_lv0=tile_size_lv0,
-                save_dir=tile_visualize_dir,
-                downsample=cfg.tiling.visu_params.downsample,
+                mask_path=mask_path,
                 backend=cfg.tiling.backend,
+                tiling_params=cfg.tiling.params,
+                segment_params=cfg.tiling.seg_params,
+                filter_params=cfg.tiling.filter_params,
+                mask_visu_path=tissue_mask_visu_path,
+                num_workers=num_workers,
             )
+            coordinates_dir = Path(cfg.output_dir, "coordinates")
+            coordinates_path = Path(coordinates_dir, f"{wsi_name}.npy")
+            save_coordinates(
+                coordinates=coordinates,
+                target_spacing=cfg.tiling.params.spacing,
+                tile_level=tile_level,
+                tile_size=cfg.tiling.params.tile_size,
+                resize_factor=resize_factor,
+                tile_size_lv0=tile_size_lv0,
+                save_path=coordinates_path,
+            )
+            if cfg.visualize and tile_visualize_dir is not None:
+                visualize_coordinates(
+                    wsi_path=wsi_path,
+                    coordinates=coordinates,
+                    tile_size_lv0=tile_size_lv0,
+                    save_dir=tile_visualize_dir,
+                    downsample=cfg.tiling.visu_params.downsample,
+                    backend=cfg.tiling.backend,
+                )
         return str(wsi_path), {"status": "success"}
 
     except Exception as e:
+        print(e)
         return str(wsi_path), {
             "status": "failed",
             "error": str(e),
@@ -120,7 +124,7 @@ def main(args):
         process_df = pd.DataFrame(data)
 
     skip_tiling = process_df["tiling_status"].str.contains("success").all()
-
+    print("skip tiling: ", skip_tiling)
     if not skip_tiling:
         if cfg.tiling.read_coordinates_from is not None:
             coordinates_dir = Path(cfg.tiling.read_coordinates_from)

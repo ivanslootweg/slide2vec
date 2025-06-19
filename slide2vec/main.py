@@ -9,7 +9,7 @@ import threading
 import subprocess
 
 from pathlib import Path
-
+from slide2vec.distributed import _get_master_port
 from slide2vec.utils.config import setup, hf_login
 
 
@@ -50,9 +50,12 @@ def run_tiling(config_file, run_id):
 def run_feature_extraction(config_file, run_id):
     print("Running embed.py...")
     # find a free port
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
-        free_port = s.getsockname()[1]
+    job_id = int(os.environ["SLURM_JOB_ID"])
+    # with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    #     s.bind(('', 0))
+    #     free_port = s.getsockname()[1]
+    free_port = _get_master_port(job_id)
+    print("using port: ", free_port)
     cmd = [
         sys.executable,
         "-m",

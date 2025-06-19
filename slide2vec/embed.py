@@ -18,7 +18,7 @@ from slide2vec.utils import fix_random_seeds
 from slide2vec.utils.config import get_cfg_from_file, setup_distributed
 from slide2vec.models import ModelFactory
 from slide2vec.data import TileDataset, RegionUnfolding
-
+from slide2vec.utils.signal_utils import ExitHandler, PathUnlinker
 torchvision.disable_beta_transforms_warning()
 
 
@@ -110,9 +110,7 @@ def main(args):
     cfg = get_cfg_from_file(args.config_file)
     output_dir = Path(cfg.output_dir, args.run_id)
     cfg.output_dir = str(output_dir)
-
     setup_distributed()
-
     coordinates_dir = Path(cfg.output_dir, "coordinates")
     fix_random_seeds(cfg.seed)
     torch.backends.cudnn.deterministic = True
@@ -180,68 +178,101 @@ def main(args):
             position=1,
         ):
             try:
-                dataset = create_dataset(wsi_fp, coordinates_dir, cfg.tiling.params.spacing, cfg.tiling.backend, transforms)
-                if distributed.is_enabled_and_multiple_gpus():
-                    sampler = torch.utils.data.DistributedSampler(
-                        dataset,
-                        shuffle=False,
-                        drop_last=False,
-                    )
-                else:
-                    sampler = None
-                dataloader = torch.utils.data.DataLoader(
-                    dataset,
-                    batch_size=cfg.model.batch_size,
-                    sampler=sampler,
-                    num_workers=num_workers,
-                    pin_memory=True,
-                )
-
                 name = wsi_fp.stem.replace(" ", "_")
+                lock_path = Path(cfg.output_dir, "locks", f"{wsi_fp.stem}.lock")
+                # Only the main rank handles locking
+                if lock_path.exists():
+                    if distributed.is_main_process():
+                        print(f"[{name}] Skipping (lock exists)")
+                    skip_slide = True
+                    path_unlinker = None
+                else:
+                    skip_slide = False
+                    if distributed.is_main_process():
+                        lock_path.parent.mkdir(parents=True, exist_ok=True)
+                        lock_path.touch()
+                        path_unlinker = ExitHandler.instance().add_path_unlinker(lock_path)
+
+                torch.distributed.barrier()  # Ensure all processes wait until lock is made or decision is made for skipping 
+                if skip_slide:
+                    continue
+
                 feature_path = features_dir / f"{name}.pt"
-                tmp_feature_path = tmp_dir / f"{name}-rank_{distributed.get_global_rank()}.h5"
+                if not Path(feature_path).exists():
+                    print(f"[{name}] processing")
+                    dataset = create_dataset(wsi_fp, coordinates_dir, cfg.tiling.params.spacing, cfg.tiling.backend, transforms)
+                    if distributed.is_enabled_and_multiple_gpus():
+                        sampler = torch.utils.data.DistributedSampler(
+                            dataset,
+                            shuffle=False,
+                            drop_last=False,
+                        )
+                    else:
+                        sampler = None
+                    dataloader = torch.utils.data.DataLoader(
+                        dataset,
+                        batch_size=cfg.model.batch_size,
+                        sampler=sampler,
+                        num_workers=num_workers,
+                        pin_memory=True,
+                    )
 
-                # get feature dimension and dtype using a dry run
-                with torch.inference_mode(), autocast_context:
-                    sample_batch = next(iter(dataloader))
-                    sample_image = sample_batch[1].to(model.device)
-                    sample_feature = model(sample_image).cpu().numpy()
-                    feature_dim = sample_feature.shape[1:]
-                    dtype = sample_feature.dtype
+                    name = wsi_fp.stem.replace(" ", "_")
+                    feature_path = features_dir / f"{name}.pt"
+                    tmp_feature_path = tmp_dir / f"{name}-rank_{distributed.get_global_rank()}.h5"
 
-                run_inference(
-                    dataloader,
-                    model,
-                    model.device,
-                    autocast_context,
-                    unit,
-                    cfg.model.batch_size,
-                    tmp_feature_path,
-                    feature_dim,
-                    dtype,
-                )
+                    # get feature dimension and dtype using a dry run
+                    with torch.inference_mode(), autocast_context:
+                        sample_batch = next(iter(dataloader))
+                        sample_image = sample_batch[1].to(model.device)
+                        sample_feature = model(sample_image).cpu().numpy()
+                        feature_dim = sample_feature.shape[1:]
+                        dtype = sample_feature.dtype
 
-                torch.distributed.barrier()
+                    run_inference(
+                        dataloader,
+                        model,
+                        model.device,
+                        autocast_context,
+                        unit,
+                        cfg.model.batch_size,
+                        tmp_feature_path,
+                        feature_dim,
+                        dtype,
+                    )
 
-                if distributed.is_main_process():
-                    wsi_feature = load_and_sort_features(tmp_dir, name)
-                    torch.save(wsi_feature, feature_path)
+                    torch.distributed.barrier()
 
-                    # cleanup
-                    del wsi_feature
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                    if distributed.is_main_process():
+                        wsi_feature = load_and_sort_features(tmp_dir, name)
+                        torch.save(wsi_feature, feature_path)
 
-                torch.distributed.barrier()
+                        # cleanup
+                        del wsi_feature
+                        torch.cuda.empty_cache()
+                        gc.collect()
 
+                    torch.distributed.barrier()
+                else:
+                    print(f"[{name}] exists")
+                    
                 feature_extraction_updates[str(wsi_fp)] = {"status": "success"}
 
             except Exception as e:
+                print(e)
                 feature_extraction_updates[str(wsi_fp)] = {
                     "status": "failed",
                     "error": str(e),
                     "traceback": str(traceback.format_exc()),
                 }
+            finally:
+                    torch.distributed.barrier()  # All ranks wait before releasing the lock
+                    if distributed.is_main_process():
+                        if path_unlinker:
+                            lock_path.unlink()
+                            ExitHandler.instance().remove(path_unlinker)
+                    if distributed.is_enabled_and_multiple_gpus():
+                        torch.distributed.barrier()
 
             # update process_df
             if distributed.is_main_process():
@@ -263,7 +294,7 @@ def main(args):
 
         if distributed.is_main_process():
             # summary logging
-            slides_with_tiles = len(tiled_df)
+            slides_with_tiles = len(tiled_df)   
             total_slides = len(process_df)
             failed_feature_extraction = process_df[
                 ~(process_df["feature_status"] == "success")

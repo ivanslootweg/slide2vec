@@ -93,6 +93,30 @@ def _restrict_print_to_main_process() -> None:
     __builtin__.print = print
 
 
+def get_seeded_available_port(seed: int = 0) -> int:
+    MIN_MASTER_PORT, MAX_MASTER_PORT = 20_000, 60_000
+    RANGE = MAX_MASTER_PORT - MIN_MASTER_PORT
+
+    # Check if port is manually set
+    master_port_str = os.environ.get("MASTER_PORT")
+    if master_port_str is not None:
+        return int(master_port_str)
+
+    rng = random.Random(seed)
+    start_port = rng.randint(MIN_MASTER_PORT, MAX_MASTER_PORT)
+
+    # Try ports in a deterministic sequence from start_port
+    for offset in range(RANGE):
+        port = MIN_MASTER_PORT + (start_port - MIN_MASTER_PORT + offset) % RANGE
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("", port))
+                return port
+            except OSError:
+                continue
+
+    raise RuntimeError("No available port found in the specified range.")
+
 def _get_master_port(seed: int = 0) -> int:
     MIN_MASTER_PORT, MAX_MASTER_PORT = (20_000, 60_000)
 
