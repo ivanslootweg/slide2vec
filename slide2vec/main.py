@@ -129,7 +129,7 @@ def main(args):
     print("Tiling completed.")
     print("=+=" * 10)
 
-    features_dir = output_dir / "features"
+    features_dir = output_dir / f"features_{cfg.model.name}"
     if cfg.wandb.enable:
         stop_event = threading.Event()
         log_thread = threading.Thread(

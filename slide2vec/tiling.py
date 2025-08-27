@@ -83,12 +83,13 @@ def process_slide(
         return str(wsi_path), {"status": "success"}
 
     except Exception as e:
-        print(e)
+        # print(e)
         return str(wsi_path), {
             "status": "failed",
             "error": str(e),
             "traceback": str(traceback.format_exc()),
         }
+
 
 
 def main(args):
@@ -100,6 +101,7 @@ def main(args):
     fix_random_seeds(cfg.seed)
 
     wsi_paths, mask_paths = load_csv(cfg)
+    print("masks and wsis: ", len(mask_paths), len(wsi_paths))
 
     parallel_workers = min(mp.cpu_count(), cfg.speed.num_workers_tiling)
     if "SLURM_JOB_CPUS_PER_NODE" in os.environ:
@@ -107,10 +109,11 @@ def main(args):
             parallel_workers, int(os.environ["SLURM_JOB_CPUS_PER_NODE"])
         )
 
-    process_list = Path(cfg.output_dir, "process_list.csv")
+    process_list = Path(cfg.output_dir, f"{cfg.process_list}.csv")
     if process_list.is_file() and cfg.resume:
         process_df = pd.read_csv(process_list)
     else:
+        print("masks and wsis: ", len(mask_paths), len(wsi_paths))
         data = {
             "wsi_path": [str(p) for p in wsi_paths],
             "mask_path": [str(p) if p is not None else p for p in mask_paths],

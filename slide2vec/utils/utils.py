@@ -113,6 +113,9 @@ def initialize_wandb(
 
 def load_csv(cfg):
     df = pd.read_csv(cfg.csv)
+    columns = [ col for col in ["wsi_path","slide_path","mask_path","segmentation_mask_path"] if col in df.columns]
+    df = df.dropna(subset=columns)
+    
     if "wsi_path" in df.columns:
         wsi_paths = [Path(x) for x in df.wsi_path.values.tolist()]
     elif "slide_path" in df.columns:
@@ -123,6 +126,12 @@ def load_csv(cfg):
         mask_paths = [Path(x) for x in df.segmentation_mask_path.values.tolist()]
     else:
         mask_paths = [None for _ in wsi_paths]
+    print(len(wsi_paths))
+    print(len(mask_paths))
+    # wsi_paths = list(filter(lambda x: "/" in str(x), wsi_paths))
+    # mask_paths = list(filter(lambda x: "/" in str(x), mask_paths))
+
+    
     return wsi_paths, mask_paths
 
 
