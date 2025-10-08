@@ -103,6 +103,16 @@ def run_feature_aggregation(config_file, run_id):
         preexec_fn=os.setsid,
         text=True,
     )
+
+    # with open("aggregate.log", "w") as log:
+    #     proc = subprocess.Popen(
+    #         cmd,
+    #         preexec_fn=os.setsid,
+    #         text=True,
+    #         stdout=log,
+    #         stderr=log,
+    #     )
+
     try:
         proc.communicate()
     except KeyboardInterrupt:
@@ -112,7 +122,9 @@ def run_feature_aggregation(config_file, run_id):
         sys.exit(1)
     if proc.returncode != 0:
         print("Feature aggregation failed. Exiting.")
-        sys.exit(proc.returncode)
+        # debugging
+        #sys.exit(proc.returncode)
+        run_feature_aggregation(config_file,run_id)
 
 
 def main(args):
@@ -145,6 +157,10 @@ def main(args):
         run_feature_aggregation(config_file, run_id)
         print("Feature aggregation completed.")
         print("=+=" * 10)
+        # os.remove(str(Path(cfg.output_dir,run_id, f"{cfg.process_list}.csv")))
+        # run_tiling(config_file, run_id)
+        # run_feature_extraction(config_file, run_id)
+        # run_feature_aggregation(config_file,run_id)
 
     if cfg.wandb.enable:
         stop_event.set()

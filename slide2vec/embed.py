@@ -91,7 +91,7 @@ def run_inference(dataloader, model, device, autocast_context, unit, batch_size,
     gc.collect()
 
 
-def load_and_sort_features(tmp_dir, name):
+def load_and_sort_features(tmp_dir, name, expected_len=None):
     features_list, indices_list = [], []
     for rank in range(distributed.get_global_size()):
         fp = tmp_dir / f"{name}-rank_{rank}.h5"
@@ -101,9 +101,45 @@ def load_and_sort_features(tmp_dir, name):
         os.remove(fp)
     features = torch.cat(features_list, dim=0)
     indices = torch.cat(indices_list, dim=0)
-    sorted_indices = torch.argsort(indices)
-    sorted_features = features[sorted_indices]
-    return sorted_features
+    order = torch.argsort(indices)
+    indices = indices[order]
+    features = features[order]
+
+    # deduplicate
+    keep = torch.ones_like(indices, dtype=torch.bool)
+    keep[1:] = indices[1:] != indices[:-1]
+    indices = indices[keep]
+    features = features[keep]
+    if expected_len is not None:
+        assert len(indices) == expected_len, f"Got {len(indices)} items, expected {expected_len}"
+    
+    
+    return features
+
+def update_process_list_with_features(process_df, features_dir, process_list_path):
+    """
+    Check for existing feature files and update the process_df accordingly.
+    Saves the updated process_df back to CSV.
+
+    Args:
+        process_df (pd.DataFrame): The process list dataframe.
+        features_dir (Path): Path where extracted feature files are stored.
+        process_list_path (Path): Path to the CSV process list.
+    Returns:
+        pd.DataFrame: Updated process_df with 'feature_status' set to 'success'
+                      where feature files exist.
+    """
+    features_dir.mkdir(exist_ok=True, parents=True)
+
+    for idx, row in process_df.iterrows():
+        if row["tiling_status"] == "success":
+            feat_path = features_dir / f"{Path(row['wsi_path']).stem.replace(' ', '_')}.pt"
+            if feat_path.exists():
+                process_df.at[idx, "feature_status"] = "success"
+
+    # Save immediately
+    process_df.to_csv(process_list_path, index=False)
+    return process_df
 
 
 def main(args):
@@ -123,12 +159,17 @@ def main(args):
     if "SLURM_JOB_CPUS_PER_NODE" in os.environ:
         num_workers = min(num_workers, int(os.environ["SLURM_JOB_CPUS_PER_NODE"]))
 
+    # --- Load process list ---
     process_list = Path(cfg.output_dir, f"{cfg.process_list}.csv")
-    assert (
-        process_list.is_file()
-    ), "Process list CSV not found. Ensure tiling has been run."
+    assert process_list.is_file(), "Process list CSV not found. Ensure tiling has been run."
     process_df = pd.read_csv(process_list)
-    skip_feature_extraction = process_df["feature_status"].str.contains("success").all()
+
+    # --- Update with existing feature files ---
+    features_dir = Path(cfg.output_dir, f"features_{cfg.model.name}")
+    process_df = update_process_list_with_features(process_df, features_dir, process_list)
+
+    # --- Check if all features are done ---
+    skip_feature_extraction = process_df.query("tiling_status == 'success'")["feature_status"].eq("success").all()
 
     if skip_feature_extraction:
         if distributed.is_main_process():
@@ -140,22 +181,16 @@ def main(args):
         return
         ## END OF PROGRAM ##
 
-
+    # --- Otherwise continue with extraction ---
     model = ModelFactory(cfg.model).get_model()
     if distributed.is_main_process():
         print(f"Starting {unit}-level feature extraction...")
     torch.distributed.barrier()
 
-    # select slides that were successfully tiled but not yet processed for feature extraction
+    # Select slides that still need features
     tiled_df = process_df[process_df.tiling_status == "success"]
-    mask = tiled_df["feature_status"] != "success"
-    process_stack = tiled_df[mask]
+    process_stack = tiled_df[tiled_df.feature_status != "success"]
     wsi_paths_to_process = [Path(x) for x in process_stack.wsi_path.values.tolist()]
-
-    features_dir = Path(cfg.output_dir, f"features_{cfg.model.name}")
-    if distributed.is_main_process():
-        features_dir.mkdir(exist_ok=True, parents=True)
-    wsi_paths_to_process = [ w for w in wsi_paths_to_process if not os.path.exists(features_dir / f"{w.stem.replace(' ','_')}.pt")]
     total = len(wsi_paths_to_process)
 
     tmp_dir = Path("/tmp")
@@ -203,6 +238,7 @@ def main(args):
                 continue
 
             feature_path = features_dir / f"{name}.pt"
+
             if not Path(feature_path).exists():
                 print(f"[{name}] processing")
                 dataset = create_dataset(wsi_fp, coordinates_dir, cfg.tiling.params.spacing, cfg.tiling.backend, transforms)
@@ -273,42 +309,14 @@ def main(args):
             
         finally: 
             if distributed.is_main_process():
-                if path_unlinker:
+                if path_unlinker and (not os.path.exists(lock_path)):
+                    print("Not removing lock. Does not exists ", lock_path)
+                elif path_unlinker:
                     lock_path.unlink()
                     ExitHandler.instance().remove(path_unlinker)
             if distributed.is_enabled_and_multiple_gpus():
                 torch.distributed.barrier()
 
-        # update process_df
-        # process_df_lock_path = Path(cfg.output_dir, "locks", "process_df.lock")
-        # # Wait until no one else is updating process_df
-        # while process_df_lock_path.exists():
-        #     torch.distributed.barrier()
-        # # Acquire lock
-        # if distributed.is_main_process():
-        #     process_df_lock_path.parent.mkdir(parents=True, exist_ok=True)
-        #     process_df_lock_path.touch()
-        #     process_df_path_unlinker = ExitHandler.instance().add_path_unlinker(process_df_lock_path)
-        #     try:
-        #         status_info = feature_extraction_updates[str(wsi_fp)]
-        #         process_df.loc[
-        #             process_df["wsi_path"] == str(wsi_fp), "feature_status"
-        #         ] = status_info["status"]
-        #         if "error" in status_info:
-        #             process_df.loc[
-        #                 process_df["wsi_path"] == str(wsi_fp), "error"
-        #             ] = status_info["error"]
-        #             process_df.loc[
-        #                 process_df["wsi_path"] == str(wsi_fp), "traceback"
-        #             ] = status_info["traceback"]
-        #         process_df.to_csv(process_list, index=False)
-
-        #     finally:
-        #         if process_df_path_unlinker:
-        #             process_df_lock_path.unlink()
-        #             ExitHandler.instance().remove(process_df_path_unlinker)
-
-        # torch.distributed.barrier()
 
 
                 
